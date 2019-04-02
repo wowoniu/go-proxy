@@ -7,19 +7,19 @@ import (
 )
 
 type Tunnel struct {
-	AppID       string
-	RequestConn net.Conn
-	ClientConn  net.Conn
+	AppID      string
+	ClientConn net.Conn
+	LocalConn  net.Conn
 }
 
 var (
 	proxyTunnel *Tunnel
-	clientPort  string
+	serverAddr  string
 	proxyPort   string
 )
 
 func main() {
-	flag.StringVar(&clientPort, "clientPort", "9000", "客户端连接端口")
+	flag.StringVar(&serverAddr, "serverAddr", "127.0.0.1:9000", "代理服务器地址")
 	flag.StringVar(&proxyPort, "proxyPort", "80", "代理端口")
 	go connectToServer()
 	for {
@@ -27,103 +27,56 @@ func main() {
 }
 
 func connectToServer() {
-
-	tcpAddr, _ := net.ResolveTCPAddr("tcp4", "127.0.0.1:6000")
+	tcpAddr, _ := net.ResolveTCPAddr("tcp4", serverAddr)
 	conn, err := net.DialTCP("tcp", nil, tcpAddr)
 	if err != nil {
 		log.Fatal("connected error :", err)
 	}
 	defer conn.Close()
-	log.Println("CLIENT START ...")
-	log.Println("connect success")
+	log.Println("server connect success")
+	proxyTunnel = &Tunnel{
+		ClientConn: conn,
+	}
 
 	buff := make([]byte, 512)
 	for {
 		if n, err := conn.Read(buff); err != nil {
-			log.Println("READ FROM SERVER ERROR:", err)
-			return
+			log.Fatal("READ FROM SERVER ERROR:", err)
 		} else {
-			go reader(buff[:n])
+			go handleRequest(buff[:n])
 		}
 	}
 
-	//客户端连接监听
-	serverListener, err := net.Listen("tcp", ":"+clientPort)
-	if err != nil {
-		log.Fatal("client connect port listen error:", err)
-	}
-	defer clientListener.Close()
-	buf := make([]byte, 10240)
-	for {
-		conn, err := clientListener.Accept()
+}
+
+func handleRequest(data []byte) {
+	if proxyTunnel.LocalConn == nil {
+		//建立本地连接
+		tcpAddr, _ := net.ResolveTCPAddr("tcp4", "127.0.0.1:"+proxyPort)
+		conn, err := net.DialTCP("tcp", nil, tcpAddr)
 		if err != nil {
-			//连接建立失败
-			log.Println("client connect error:", err)
-			continue
+			log.Println("connected error :", err)
+			return
 		}
-		//客户端连接建立成功则创建成功一个TUNNEL
-		proxyTunnel = &Tunnel{
-			AppID:      "",
-			ClientConn: conn,
-		}
-		//开启协程 读取客户端的响应数据
+		defer conn.Close()
+		log.Println("server connect success")
+		proxyTunnel.LocalConn = conn
+
+		buff := make([]byte, 512)
 		go func() {
-			buff := make([]byte, 10240)
 			for {
-				n, err := conn.Read(buff)
-				if err != nil {
-					//读取失败
-					log.Println("client response read error:", err)
-					proxyTunnel.ClientConn = nil
+				if n, err := conn.Read(buff); err != nil {
+					log.Println("READ FROM LOCAL ERROR:", err)
 					return
+				} else {
+					go handleLocalResponse(buff[:n])
 				}
-				//对响应进行转发处理
-				go handleClientResponse(buf[:n])
 			}
 		}()
 	}
-
+	proxyTunnel.LocalConn.Write(data)
 }
 
-func listenProxyRequest() {
-	//代理请求监听
-	requestListener, err := net.Listen("tcp", ":"+proxyPort)
-	if err != nil {
-		log.Fatal("request proxy port listen error:", err)
-	}
-	defer requestListener.Close()
-	//等待代理请求建立连接
-	for {
-		requestConn, err := requestListener.Accept()
-		if err != nil {
-			log.Println("proxy request connect error:", err)
-			continue
-		}
-		//开启协程 读取代理请求的数据
-		go func() {
-			buff := make([]byte, 10240)
-			for {
-				n, err := requestConn.Read(buff)
-				if err != nil {
-					//连接可能关闭
-					log.Println("proxy request read error:", err)
-					proxyTunnel.RequestConn = nil
-					return
-				}
-				//处理代理请求的数据
-				go handleProxyRequest(buff[:n])
+func handleLocalResponse(data []byte) {
 
-			}
-		}()
-
-	}
-
-}
-
-func handleClientResponse(data []byte) {
-	proxyTunnel.RequestConn.Write(data)
-}
-
-func handleProxyRequest(data []byte) {
-	proxyTunnel.ClientConn.Write(data)
 }
